@@ -50,27 +50,32 @@ function Get-OMADMStatus {
                             $OMADMAuthInfo = (Get-ItemProperty -Path $OMADMAuthInfoKey -ErrorAction SilentlyContinue)
                             if ($OMADMAuthInfo.AuthName) {
                                 $clientCert = Get-ChildItem -path cert:\LocalMachine\My | where-object {$_.subject -eq "CN=$($OMADMAuthInfo.AuthName)"}
-                                if ($clientcert) {
-                                    write-host "Testing OMADM endpoint using client certificate $($clientcert.subject)"
-                                    try {
-                                        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-                                        Get-OMADMResponseProperties $(invoke-webrequest -uri $OMADMAddrInfo.Addr -method Head -Certificate $clientCert) $false
-                                    } catch {
-                                        Set-OMADMRESTErrorResponse
-                                    }
-                                } else { 
-                                    write-host "Testing OMADM endpoint"
-                                    try {
-                                        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-                                        Get-OMADMResponseProperties $(invoke-webrequest -uri $OMADMAddrInfo.Addr -method Head) $false
-                                    } catch {
-                                        Set-OMADMRESTErrorResponse
-                                    }
-                                }
-                                Break
+                            } else {
+                                write-warning "No OMA-DM client certificate identifier"
                             }
+                            if ($clientcert) {
+                                write-host "Testing OMADM endpoint using client certificate $($clientcert.subject)"
+                                try {
+                                    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+                                    Get-OMADMResponseProperties $(invoke-webrequest -uri $OMADMAddrInfo.Addr -method Head -Certificate $clientCert) $false
+                                } catch {
+                                    Set-OMADMRESTErrorResponse
+                                }
+                            } else { 
+                                write-warning "OMA-DM client certificate not found in store"
+                                write-host "Testing OMADM endpoint"
+                                try {
+                                    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+                                    Get-OMADMResponseProperties $(invoke-webrequest -uri $OMADMAddrInfo.Addr -method Head) $false
+                                } catch {
+                                    Set-OMADMRESTErrorResponse
+                                }
+                            }
+                        } else {
+                            write-warning "OMA-DM URL for $($OMADMAddrInfo.Addr) not found`n"
                         }
                     }
+                    break
                 }
             }
         }
@@ -186,4 +191,45 @@ function Remove-OMADMAdminPriv {
     }
     New-EventLog -LogName "System" -Source $providerId -ErrorAction SilentlyContinue
     Write-EventLog -LogName "System" -Source $providerId -EventID 1001 -EntryType $MsgType -Message $Message -ErrorAction SilentlyContinue
+}
+
+function Remove-OMADMEnrollment {
+    param(
+        [Parameter(Mandatory=$true)][string]$providerId
+    )
+    $EnrollmentsPath = "HKLM:\\SOFTWARE\Microsoft\Enrollments"
+    $OMADMAccountsPath = "HKLM:\\SOFTWARE\Microsoft\Provisioning\OMADM\Accounts"
+    New-EventLog -LogName "System" -Source $providerId -ErrorAction SilentlyContinue
+    # find the UEM enrollment record
+    $Enrollments = (Get-ChildItem -Path $EnrollmentsPath -ErrorAction SilentlyContinue)
+    ForEach ($EnrollmentKey in $Enrollments) {
+        $EnrollmentGUID = $EnrollmentKey.PSChildName
+        $EnrollmentPath = "$EnrollmentsPath\$EnrollmentGUID"
+        $Enrollment = (Get-ItemProperty -Path $EnrollmentPath)
+        if ($Enrollment.ProviderId -ne $null) {
+            if ($Enrollment.ProviderId = $providerId) {
+                # found the UEM enrollment, now get the OMA-DM URL
+                $OMADMAccountKey = "$OMADMAccountsPath\$EnrollmentGUID"
+                if ($OMADMAccountKey) {
+                    # remove the enrollment record
+                    Get-Item $EnrollmentKey | Remove-Item -Force
+                    # remove the OMADM account
+                    Get-Item $OMADMAccountKey | Remove-Item -Force
+                    $message = "Removed enrollment for provider $providerId"
+                    Write-Host $message
+                    Write-EventLog -LogName "System" -Source $providerId -EventID 1001 -EntryType "Information" -Message $message
+                } else {
+                    $message = "Enrollment for provider $providerId has no associated OMA-DM account"
+                    Write-warning $message
+                    Write-EventLog -LogName "System" -Source $providerId -EventID 1001 -EntryType "Warning" -Message $message
+                }
+                break
+            }
+        }
+    }
+    if (-not $OMADMAccountKey) {
+        $message = "No enrollment for provider $providerId found"
+        Write-warning $message
+        Write-EventLog -LogName "System" -Source $providerId -EventID 1001 -EntryType "Warning" -Message $message
+    }
 }
