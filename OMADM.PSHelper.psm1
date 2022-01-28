@@ -13,7 +13,11 @@ function Get-OMADMProvider {
                 $OMADMAddrInfo = (Get-ItemProperty -Path $OMADMAddrInfoKey -ErrorAction SilentlyContinue)
                 $Provider = New-Object PSObject
                 $Provider | Add-member Noteproperty ProviderId $Enrollment.ProviderId
-                $Provider | Add-member Noteproperty UPN $Enrollment.UPN
+                $Provider | Add-member Noteproperty EnrolledUser $Enrollment.UPN
+                if ($Enrollment.SID) {
+                    $ManagedUser = (New-Object System.Security.Principal.SecurityIdentifier $Enrollment.SID).Translate([System.Security.Principal.NTAccount]).Value
+                }
+                $Provider | Add-member Noteproperty ManagedUser $ManagedUser
                 $Provider | Add-member Noteproperty DiscoveryService $Enrollment.DiscoveryServiceFullURL
                 $Provider | Add-member Noteproperty OMADMURL $OMADMAddrInfo.Addr
                 $Provider
@@ -22,9 +26,35 @@ function Get-OMADMProvider {
     }
 }
 
-function Get-OMADMStatus {
+function Get-OMADMEnrollmentUser {
     param(
         [Parameter(Mandatory=$true)][string]$providerId
+    )
+    $EnrollmentsPath = "HKLM:\\SOFTWARE\Microsoft\Enrollments"
+    # find the UEM enrollment record
+    $Enrollments = (Get-ChildItem -Path $EnrollmentsPath -ErrorAction SilentlyContinue)
+    if ($Enrollments -ne $null) {
+        ForEach ($EnrollmentKey in $Enrollments) {
+            $EnrollmentGUID = $EnrollmentKey.PSChildName
+            $EnrollmentPath = "$EnrollmentsPath\$EnrollmentGUID"
+            $Enrollment = (Get-ItemProperty -Path $EnrollmentPath)
+            if ($Enrollment.ProviderId -ne $null) {
+                if ($Enrollment.ProviderId = $providerId) {
+                    # found the UEM enrollment!
+                    $SIDObject = New-Object System.Security.Principal.SecurityIdentifier $Enrollment.SID
+                    $UserObject = $SIDObject.Translate([System.Security.Principal.NTAccount])
+                    $UserObject.Value
+                    Break
+                }
+            }
+        }
+    }
+}
+
+function Get-OMADMStatus {
+    param(
+        [Parameter(Mandatory=$true)][string]$providerId,
+        [Parameter(Mandatory=$false)][string]$method = 'HEAD'
     )
     $EnrollmentsPath = "HKLM:\\SOFTWARE\Microsoft\Enrollments"
     $OMADMAccountsPath = "HKLM:\\SOFTWARE\Microsoft\Provisioning\OMADM\Accounts"
@@ -48,25 +78,46 @@ function Get-OMADMStatus {
                             write-host "Found OMA-DM URL $($OMADMAddrInfo.Addr)"
                             $OMADMAuthInfoKey = "$OMADMAccountKey\Protected\AuthInfo1"
                             $OMADMAuthInfo = (Get-ItemProperty -Path $OMADMAuthInfoKey -ErrorAction SilentlyContinue)
-                            if ($OMADMAuthInfo.AuthName) {
-                                $clientCert = Get-ChildItem -path cert:\LocalMachine\My | where-object {$_.subject -eq "CN=$($OMADMAuthInfo.AuthName)"}
-                            } else {
-                                write-warning "No OMA-DM client certificate identifier"
+                            $certSubject = "CN=$($OMADMAuthInfo.AuthName)"
+                            $certStore = "cert:\LocalMachine\My"
+                            $clientCert = Get-ChildItem -path $certStore | where-object {$_.subject -eq $certSubject}
+                            if ($clientCert -eq $null) {
+                                $OMADMProtectedKey = "$OMADMAccountKey\Protected"
+                                $OMADMProtected = (Get-ItemProperty -Path $OMADMProtectedKey -ErrorAction SilentlyContinue)
+                                if ($OMADMProtected.SslClientCertSearchCriteria -ne "") {
+                                    $certCrit = $([System.Web.HttpUtility]::UrlDecode($OMADMProtected.SslClientCertSearchCriteria)).Split("&")
+                                    $certSubject = "CN=$(($certCrit[0].Split("="))[2])"
+                                    $certStore =  $($certCrit[1].Split("=")[1]).ToUpper()
+                                    switch ($certStore) {
+                                        "MY\USER" {
+                                            $certStore = "cert:\CurrentUser\My"
+                                        }
+                                        "MY\SYSTEM" {
+                                            $certStore = "cert:\LocalMachine\My"
+                                        }
+                                        else {
+                                            $certStore =""
+                                        }
+                                    }
+                                    if ($certStore -ne "") {
+                                        $clientCert = Get-ChildItem -path $certStore | where-object {$_.subject -eq $certSubject}
+                                    }
+                                }
                             }
-                            if ($clientcert) {
+                            if ($clientcert.subject -ne $null) {
                                 write-host "Testing OMADM endpoint using client certificate $($clientcert.subject)"
                                 try {
                                     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-                                    Get-OMADMResponseProperties $(invoke-webrequest -uri $OMADMAddrInfo.Addr -method Head -Certificate $clientCert) $false
+                                    Get-OMADMResponseProperties $(invoke-webrequest -uri $OMADMAddrInfo.Addr -method $method -Certificate $clientCert) $false
                                 } catch {
                                     Set-OMADMRESTErrorResponse
                                 }
                             } else { 
-                                write-warning "OMA-DM client certificate not found in store"
+                                write-warning "No OMA-DM client certificate found"
                                 write-host "Testing OMADM endpoint"
                                 try {
                                     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-                                    Get-OMADMResponseProperties $(invoke-webrequest -uri $OMADMAddrInfo.Addr -method Head) $false
+                                    Get-OMADMResponseProperties $(invoke-webrequest -uri $OMADMAddrInfo.Addr -method $method) $false
                                 } catch {
                                     Set-OMADMRESTErrorResponse
                                 }

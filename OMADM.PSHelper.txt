@@ -1,0 +1,17 @@
+Get-OMAProvider:list OMA-DM provider enrollments
+
+Get-OMADMEnrollmentUser: retreive the identity of the user that enrolled a provider
+	-providerId: provider ID to retreive
+
+Get-OMADMStatus: test an MDA-DM endpoint
+	-providerId: provider ID to test
+	-method optional, http method to use, defaults to HEAD
+
+Add-OMADMAdminPriv: adds enrollment user to local Administrators group
+	-providerId: provider ID of enrollment whose user is to be privledged
+
+Remove-OMADMAdminPriv: removes enrollment user from local Administrators group
+	-providerId: provider ID of enrollment whose user is to be de-privledged
+
+Remove-OMADMEnrollment: unenroll a provider
+	-providerId: provider ID to unenroll
